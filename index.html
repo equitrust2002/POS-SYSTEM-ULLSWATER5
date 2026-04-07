@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>OmniPOS Apex v18 - Ultra Scan</title>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        :root {
+            --bg: #000; --surface: #1c1c1e; --accent: #32d74b; --text: #fff; 
+            --text-dim: #8e8e93; --border: #38383a; --danger: #ff453a;
+        }
+        * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; font-family: -apple-system, sans-serif; }
+        body { background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Navigation Sidebar */
+        .sidebar { width: 75px; background: var(--surface); display: flex; flex-direction: column; align-items: center; padding: 30px 0; gap: 35px; border-right: 1px solid var(--border); z-index: 100; }
+        .nav-icon { color: var(--text-dim); font-size: 26px; cursor: pointer; padding: 14px; border-radius: 18px; transition: 0.2s; }
+        .nav-icon.active { color: var(--accent); background: rgba(50, 215, 75, 0.1); }
+
+        .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+        .viewport { display: none; flex-direction: column; height: 100%; }
+        .viewport.active { display: flex; }
+        
+        .top-bar { padding: 18px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: rgba(28,28,30,0.9); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+
+        /* ULTRA SCANNER ENGINE */
+        #scanner-wrapper { position: relative; width: 100%; height: 320px; background: #000; display: none; overflow: hidden; border-bottom: 3px solid var(--accent); }
+        #reader { width: 100%; height: 100%; }
+        .scan-region { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 240px; height: 160px; border: 2px solid var(--accent); border-radius: 15px; box-shadow: 0 0 0 2000px rgba(0,0,0,0.7); pointer-events: none; z-index: 10; }
+        .scan-line { position: absolute; width: 100%; height: 2px; background: var(--accent); top: 0; animation: scanAnim 2s infinite linear; }
+        @keyframes scanAnim { 0% { top: 0; } 100% { top: 100%; } }
+
+        /* Grid & Cart */
+        .inventory-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; padding: 15px; }
+        .item-card { background: var(--surface); border-radius: 16px; overflow: hidden; border: 1px solid var(--border); cursor: pointer; }
+        .item-card img { width: 100%; height: 90px; object-fit: cover; }
+        
+        .cart-panel { width: 360px; background: var(--surface); display: flex; flex-direction: column; border-left: 1px solid var(--border); }
+        .cart-list { flex: 1; overflow-y: auto; padding: 15px; }
+        .checkout-box { padding: 20px; border-top: 1px solid var(--border); background: var(--bg); padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+        
+        /* iPhone Optimized Buttons */
+        .btn-main { width: 100%; background: var(--accent); color: #000; border: none; padding: 18px; border-radius: 14px; font-weight: 800; font-size: 16px; cursor: pointer; margin-bottom: 10px; }
+        .btn-pdf { width: 100%; background: #fff; color: #000; border: none; padding: 14px; border-radius: 14px; font-weight: 700; font-size: 14px; cursor: pointer; margin-bottom: 10px; }
+        .btn-void { background: none; border: none; color: var(--danger); font-weight: bold; font-size: 12px; width: 100%; cursor: pointer; }
+
+        /* Table */
+        .table-scroll { flex: 1; overflow: auto; padding: 10px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { color: var(--accent); text-align: left; padding: 15px; border-bottom: 1px solid var(--border); }
+        td { padding: 15px; border-bottom: 1px solid var(--border); }
+        .edit-input { background: #2c2c2e; border: 1px solid var(--border); color: #fff; width: 100%; padding: 10px; border-radius: 8px; }
+
+        /* HIGH-PRIORITY PRINT TEMPLATE */
+        #receipt-p { display: none; }
+        @media print {
+            body > *:not(#receipt-p) { display: none !important; }
+            #receipt-p { 
+                display: block !important;
+                width: 100%; max-width: 80mm; margin: 0 auto;
+                color: #000; background: #fff; padding: 20px;
+                font-family: 'Courier New', Courier, monospace; font-size: 12pt;
+            }
+            .no-print { display: none !important; }
+        }
+
+        .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+        .modal-body { background: var(--surface); padding: 30px; border-radius: 24px; width: 100%; max-width: 420px; }
+    </style>
+</head>
+<body>
+
+<nav class="sidebar">
+    <div class="nav-icon active" onclick="showTab('tab-pos', this)">🛒</div>
+    <div class="nav-icon" onclick="showTab('tab-inv', this)">📊</div>
+    <div class="nav-icon" onclick="showTab('tab-logs', this)">📜</div>
+    <div class="nav-icon" onclick="showTab('tab-cfg', this)">⚙️</div>
+</nav>
+
+<div class="main-content">
+    <div id="tab-pos" class="viewport active">
+        <div class="top-bar">
+            <h2 id="disp-store-name" style="color:var(--accent); margin:0;">APEX SCANNER</h2>
+            <button onclick="openItemModal()" style="background:var(--accent); color:#000; border:none; padding:10px 18px; border-radius:12px; font-weight:800; font-size:12px;">+ ADD ITEM</button>
+        </div>
+        <div id="scanner-wrapper">
+            <div id="reader"></div>
+            <div class="scan-region"><div class="scan-line"></div></div>
+            <button onclick="stopScanning()" style="position:absolute; bottom:20px; right:20px; background:var(--danger); color:#fff; border:none; padding:12px 20px; border-radius:14px; font-weight:bold; z-index:20;">CLOSE</button>
+        </div>
+        <div class="inventory-grid" id="posGrid"></div>
+    </div>
+
+    <div id="tab-inv" class="viewport">
+        <div class="top-bar"><h2>Stock List</h2></div>
+        <div class="table-scroll"><table><thead><tr><th>Code</th><th>Name</th><th>Price</th><th>Stock</th></tr></thead><tbody id="invTableBody"></tbody></table></div>
+    </div>
+
+    <div id="tab-logs" class="viewport">
+        <div class="top-bar"><h2>Sale History</h2></div>
+        <div class="table-scroll"><table><thead><tr><th>Ref</th><th>Customer</th><th>Total</th><th>Status</th><th>Action</th></tr></thead><tbody id="logsTableBody"></tbody></table></div>
+    </div>
+
+    <div id="tab-cfg" class="viewport">
+        <div class="top-bar"><h2>Print Config</h2></div>
+        <div style="padding:25px;">
+            <input type="text" id="cfg-name" placeholder="Store Name" class="edit-input" style="margin-bottom:15px;">
+            <input type="text" id="cfg-sub" placeholder="Store Info / Address" class="edit-input" style="margin-bottom:15px;">
+            <input type="text" id="cfg-foot" placeholder="Footer Message" class="edit-input" style="margin-bottom:25px;">
+            <button onclick="saveConfig()" class="btn-main">SAVE SETTINGS</button>
+        </div>
+    </div>
+</div>
+
+<div class="cart-panel">
+    <div id="cart-mode" style="padding:15px; font-weight:900; font-size:12px; color:var(--accent); background:#2c2c2e;">REGISTER ACTIVE</div>
+    <div class="cart-list" id="cartItems"></div>
+    <div class="checkout-box">
+        <input type="text" id="custName" placeholder="Customer Name" style="width:100%; background:var(--surface); border:1px solid var(--border); color:#fff; padding:15px; border-radius:12px; margin-bottom:15px; font-size:16px;">
+        <div style="display:flex; justify-content:space-between; font-size:28px; font-weight:900; margin-bottom:20px;">
+            <span style="color:var(--text-dim); font-size:15px;">TOTAL</span><span id="grandTotal" style="color:var(--accent);">₱0.00</span>
+        </div>
+        <button class="btn-pdf" onclick="processSale('pdf')">SAVE AS PDF / SHARE</button>
+        <button class="btn-main" onclick="processSale('print')">PRINT RECEIPT</button>
+        <button onclick="clearCart()" class="btn-void">CLEAR TRANSACTION</button>
+    </div>
+</div>
+
+<div onclick="startScanner('ticker')" style="position:fixed; bottom:30px; right:390px; width:70px; height:70px; background:var(--accent); border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:32px; z-index:99; box-shadow:0 10px 30px #000;">📷</div>
+
+<div class="modal" id="itemModal">
+    <div class="modal-body">
+        <h3 style="color:var(--accent); margin-top:0;">Product Detail</h3>
+        <div style="display:flex; gap:10px; margin-bottom:15px;">
+            <input type="text" id="m-code" placeholder="Barcode" class="edit-input">
+            <button onclick="startScanner('setup')" style="background:var(--accent); border:none; border-radius:10px; padding:0 15px;">📷</button>
+        </div>
+        <input type="text" id="m-name" placeholder="Item Name" class="edit-input" style="margin-bottom:15px;">
+        <input type="number" id="m-price" placeholder="Price" class="edit-input" style="margin-bottom:15px;">
+        <input type="number" id="m-stock" placeholder="Initial Stock" class="edit-input" style="margin-bottom:15px;">
+        <input type="file" id="m-img" accept="image/*" style="font-size:11px; margin-bottom:20px;">
+        <button onclick="saveItem()" class="btn-main">SAVE ITEM</button>
+        <button onclick="closeModals()" class="btn-void">CLOSE</button>
+    </div>
+</div>
+
+<div id="receipt-p">
+    <div style="text-align:center;">
+        <h2 id="r-head" style="margin:0;"></h2>
+        <p id="r-sub" style="font-size:10pt; margin:5px 0;"></p>
+        ------------------------------------------
+    </div>
+    <div id="r-items" style="margin:20px 0;"></div>
+    ------------------------------------------<br>
+    <div style="display:flex; justify-content:space-between; font-weight:bold; font-size:14pt; margin-top:10px;">
+        <span>TOTAL DUE:</span><span id="r-total"></span>
+    </div>
+    <div style="text-align:center; margin-top:30px; border-top:1px dashed #000; padding-top:10px;">
+        <p id="r-foot" style="font-size:10pt;"></p>
+        <p style="font-size:9pt;">Ref: #<span id="r-id"></span> | <span id="r-date"></span></p>
+    </div>
+</div>
+
+<script>
+    let inventory = JSON.parse(localStorage.getItem('apex_v18_inv')) || [];
+    let logs = JSON.parse(localStorage.getItem('apex_v18_logs')) || [];
+    let config = JSON.parse(localStorage.getItem('apex_v18_cfg')) || { name: "ZENITH APEX", sub: "Titan District, PH", foot: "Keep your receipt for returns", ref: 8001 };
+    let cart = [];
+    let scanner = null;
+    let currentEditId = null;
+
+    // --- ULTRA-SCANNER FOR IPHONE ---
+    async function startScanner(mode) {
+        document.getElementById('scanner-wrapper').style.display = 'block';
+        if (!scanner) scanner = new Html5Qrcode("reader");
+
+        const qConfig = { 
+            fps: 30, 
+            qrbox: { width: 240, height: 160 },
+            aspectRatio: 1.0,
+            videoConstraints: { facingMode: "environment", focusMode: "continuous" }
+        };
+
+        try {
+            await scanner.start({ facingMode: "environment" }, qConfig, (decoded) => {
+                if(mode === 'ticker') {
+                    const item = inventory.find(i => i.code === decoded);
+                    if(item) {
+                        addToCart(inventory.indexOf(item));
+                        if(navigator.vibrate) navigator.vibrate(100);
+                    }
+                } else {
+                    document.getElementById('m-code').value = decoded;
+                    stopScanning();
+                }
+            });
+        } catch (e) { alert("Camera Error: Please grant permissions and use HTTPS."); stopScanning(); }
+    }
+
+    function stopScanning() {
+        if(scanner && scanner.isScanning) {
+            scanner.stop().then(() => { document.getElementById('scanner-wrapper').style.display = 'none'; });
+        } else { document.getElementById('scanner-wrapper').style.display = 'none'; }
+    }
+
+    // --- POS ENGINE ---
+    function renderGrid() {
+        document.getElementById('posGrid').innerHTML = inventory.map((i, idx) => `
+            <div class="item-card" onclick="addToCart(${idx})">
+                <img src="${i.img || 'https://via.placeholder.com/150'}">
+                <div style="padding:10px;"><strong>${i.name}</strong><br><span style="color:var(--accent)">₱${i.price}</span></div>
+            </div>
+        `).join('');
+        document.getElementById('disp-store-name').innerText = config.name;
+    }
+
+    function addToCart(idx) {
+        const item = inventory[idx];
+        const exist = cart.find(c => c.code === item.code);
+        if(exist) exist.qty++; else cart.push({...item, qty: 1, invIdx: idx});
+        updateCart();
+    }
+
+    function updateCart() {
+        let total = 0;
+        document.getElementById('cartItems').innerHTML = cart.map((i, idx) => {
+            total += (i.price * i.qty);
+            return `<div style="display:flex; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--border); font-size:13px;">
+                <div><strong>${i.name}</strong><br>₱${i.price} x ${i.qty}</div>
+                <div style="text-align:right">₱${(i.price * i.qty).toFixed(2)}<br>
+                <span onclick="cart.splice(${idx},1); updateCart();" style="color:var(--danger); cursor:pointer; font-weight:bold; font-size:10px;">VOID</span></div>
+            </div>`;
+        }).join('');
+        document.getElementById('grandTotal').innerText = "₱" + total.toLocaleString();
+    }
+
+    function processSale(mode) {
+        if(cart.length === 0) return;
+        const total = document.getElementById('grandTotal').innerText;
+        const refId = currentEditId || config.ref++;
+        const now = new Date().toLocaleString();
+        
+        const entry = { id: refId, date: now, total, items: JSON.parse(JSON.stringify(cart)), customer: document.getElementById('custName').value || "Walk-in", status: 'PAID' };
+        
+        if(currentEditId) {
+            const idx = logs.findIndex(l => l.id == currentEditId);
+            logs[idx] = entry;
+        } else {
+            logs.unshift(entry);
+        }
+
+        // MAP TO PRINT TEMPLATE
+        document.getElementById('r-head').innerText = config.name;
+        document.getElementById('r-sub').innerText = config.sub;
+        document.getElementById('r-foot').innerText = config.foot;
+        document.getElementById('r-id').innerText = refId;
+        document.getElementById('r-date').innerText = now;
+        document.getElementById('r-total').innerText = total;
+        document.getElementById('r-items').innerHTML = cart.map(i => `
+            <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
+                <span>${i.qty} x ${i.name}</span>
+                <span>${(i.qty * i.price).toFixed(2)}</span>
+            </div>`).join('');
+        
+        localStorage.setItem('apex_v18_logs', JSON.stringify(logs));
+        localStorage.setItem('apex_v18_cfg', JSON.stringify(config));
+        
+        // TRIGGER PRINT ENGINE
+        window.print();
+        clearCart();
+    }
+
+    function clearCart() { cart = []; currentEditId = null; document.getElementById('custName').value = ""; updateCart(); }
+
+    function renderLogs() {
+        document.getElementById('logsTableBody').innerHTML = logs.map((l, idx) => `
+            <tr>
+                <td>#${l.id}</td><td>${l.customer}</td><td>${l.total}</td><td>${l.status}</td>
+                <td><button onclick="reprintLog(${idx})" style="background:var(--accent); border:none; padding:8px; border-radius:6px; font-size:10px; font-weight:bold;">RE-OPEN</button></td>
+            </tr>
+        `).join('');
+    }
+
+    function reprintLog(idx) {
+        const entry = logs[idx];
+        cart = JSON.parse(JSON.stringify(entry.items));
+        currentEditId = entry.id;
+        document.getElementById('custName').value = entry.customer;
+        updateCart();
+        showTab('tab-pos', document.querySelector('.nav-icon'));
+    }
+
+    function renderInv() {
+        document.getElementById('invTableBody').innerHTML = inventory.map((i, idx) => `
+            <tr>
+                <td>${i.code}</td>
+                <td><input class="edit-input" value="${i.name}" onchange="inventory[${idx}].name=this.value; saveInv();"></td>
+                <td><input class="edit-input" type="number" value="${i.price}" onchange="inventory[${idx}].price=this.value; saveInv();"></td>
+                <td><input class="edit-input" type="number" value="${i.stock}" onchange="inventory[${idx}].stock=this.value; saveInv();"></td>
+            </tr>
+        `).join('');
+    }
+
+    function saveInv() { localStorage.setItem('apex_v18_inv', JSON.stringify(inventory)); renderGrid(); }
+
+    function showTab(id, el) {
+        document.querySelectorAll('.viewport').forEach(v => v.classList.remove('active'));
+        document.querySelectorAll('.nav-icon').forEach(n => n.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+        el.classList.add('active');
+        if(id === 'tab-inv') renderInv();
+        if(id === 'tab-logs') renderLogs();
+        if(id === 'tab-cfg') {
+            document.getElementById('cfg-name').value = config.name;
+            document.getElementById('cfg-sub').value = config.sub;
+            document.getElementById('cfg-foot').value = config.foot;
+        }
+    }
+
+    function saveConfig() {
+        config.name = document.getElementById('cfg-name').value;
+        config.sub = document.getElementById('cfg-sub').value;
+        config.foot = document.getElementById('cfg-foot').value;
+        localStorage.setItem('apex_v18_cfg', JSON.stringify(config));
+        renderGrid(); alert("Config Updated");
+    }
+
+    function saveItem() {
+        const file = document.getElementById('m-img').files[0];
+        const item = { code: document.getElementById('m-code').value, name: document.getElementById('m-name').value, price: parseFloat(document.getElementById('m-price').value), stock: parseInt(document.getElementById('m-stock').value), img: '' };
+        const done = () => { inventory.push(item); saveInv(); closeModals(); };
+        if(file) { const reader = new FileReader(); reader.onload=(e)=>{item.img=e.target.result; done();}; reader.readAsDataURL(file); } else done();
+    }
+
+    function openItemModal() { document.getElementById('itemModal').style.display='flex'; }
+    function closeModals() { document.querySelectorAll('.modal').forEach(m => m.style.display='none'); stopScanning(); }
+
+    window.onload = renderGrid;
+</script>
+</body>
+</html>
